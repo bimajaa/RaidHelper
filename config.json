@@ -1,0 +1,25 @@
+{
+  "raidNestOptions": [
+    "GDN Classic",
+    "GDN HC",
+    "DDN Classic",
+    "DDN HC",
+    "Other"
+  ],
+  "partyRoles": [
+    { "id": "MT", "label": "MT", "emoji": "🛡️" },
+    { "id": "PR", "label": "PR", "emoji": "✚" },
+    { "id": "MC", "label": "MC/DS/SE", "emoji": "🥊" },
+    { "id": "ICE", "label": "ICE", "emoji": "🧊" },
+    { "id": "ACRO", "label": "ACRO", "emoji": "🏹" },
+    { "id": "FU", "label": "FU/ACRO/DANCER", "emoji": "🗝️" },
+    { "id": "SM", "label": "SM", "emoji": "⚔️" },
+    { "id": "DPS", "label": "DPS", "emoji": "⚔️" }
+  ],
+  "partyNotes": [
+    "ISI YANG BELUM TERISI JING"
+  ],
+  "salary": {
+    "defaultStampPrice": 4
+  }
+}
