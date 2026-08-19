@@ -1,3 +1,4 @@
+const { patchInteraction } = require("../lib/i18n");
 const {
   SlashCommandBuilder,
   MessageFlags,
@@ -178,7 +179,8 @@ module.exports = {
     }
   ) {
 
-    const sub =
+        patchInteraction(interaction);
+const sub =
       interaction.options.getSubcommand();
 
     /*
@@ -434,7 +436,7 @@ module.exports = {
 
           "📦 **5. Tambahkan Drop**\n" +
           "`/drop add`\n" +
-          "`/drop bulk_add`\n\n" +
+          "`/drop bulk`\n\n" +
 
           "💰 **6. Input Barang yang Terjual**\n" +
           "`/sold_item`\n\n" +

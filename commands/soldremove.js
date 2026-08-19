@@ -1,4 +1,6 @@
 const { getSalaryDashboard } = require("../lib/scope");
+const { guildLanguage, t, patchInteraction } = require("../lib/i18n");
+const { isDiscordAdmin } = require("../lib/utils");
 const {
   SlashCommandBuilder,
   MessageFlags
@@ -25,7 +27,7 @@ module.exports = {
       o
         .setName("sale_id")
         .setDescription(
-          "ID dari /sold_list"
+          "Sale ID dari /sold_list"
         )
         .setRequired(true)
     ),
@@ -52,8 +54,9 @@ module.exports = {
     ==================================================
     */
 
-    const threadId =
-      interaction.channelId;
+    patchInteraction(interaction);
+    const lang = guildLanguage(interaction.guildId);
+    const threadId = interaction.channelId;
 
 
     /*
@@ -68,8 +71,7 @@ module.exports = {
 
       await interaction.reply({
 
-        content:
-          "❌ Sistem Salary Dashboard belum tersedia.",
+        content: t(lang, "sold_remove_dashboard_missing"),
 
         flags:
           MessageFlags.Ephemeral
@@ -97,18 +99,25 @@ module.exports = {
     if (!dashboard) {
 
       await interaction.reply({
-
-        content:
-          "❌ Thread ini belum memiliki Salary Dashboard.\n\n" +
-          "Gunakan `/salary setup` terlebih dahulu.",
-
-        flags:
-          MessageFlags.Ephemeral
+        content: t(lang, "sold_remove_setup"),
+        flags: MessageFlags.Ephemeral
       });
 
       return;
     }
 
+    const isHost = dashboard.hostId === interaction.user.id;
+    const isCoHost = Array.isArray(dashboard.coHostIds) && dashboard.coHostIds.includes(interaction.user.id);
+
+    if (!isHost && !isCoHost && !isDiscordAdmin(interaction)) {
+      await interaction.reply({
+        content: lang === "en"
+          ? "❌ Only **Host**, **Co-Host**, or **Administrator** can remove a sold item."
+          : "❌ Hanya **Host**, **Co-Host**, atau **Administrator** yang dapat menghapus sold item.",
+        flags: MessageFlags.Ephemeral
+      });
+      return;
+    }
 
     /*
     ==================================================
@@ -162,9 +171,7 @@ module.exports = {
 
       await interaction.reply({
 
-        content:
-          "❌ Sale ID tidak ditemukan di Thread ini.\n\n" +
-          "Pastikan ID berasal dari `/sold_list` pada Thread yang sama.",
+        content: t(lang, "sold_remove_not_found"),
 
         flags:
           MessageFlags.Ephemeral
@@ -251,15 +258,12 @@ module.exports = {
 
     await interaction.reply({
 
-      content:
-
-        `🗑️ **${removed.itemName}** berhasil dihapus.\n\n` +
-
-        `💰 Gold: **${removed.gold}**\n` +
-
-        `🧾 Stamp: **${removed.stamp}**\n` +
-
-        `🆔 ID: \`${removed.id}\``,
+      content: t(lang, "sold_remove_success", "", {
+        itemName: removed.itemName,
+        gold: removed.gold,
+        stamp: removed.stamp,
+        id: removed.id
+      }),
 
       flags:
         MessageFlags.Ephemeral

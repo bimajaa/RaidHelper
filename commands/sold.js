@@ -1,4 +1,5 @@
 const { getSalaryDashboard } = require("../lib/scope");
+const { t, guildLanguage , patchInteraction} = require("../lib/i18n");
 
 const {
   SlashCommandBuilder,
@@ -9,7 +10,8 @@ const {
   ActionRowBuilder,
   UserSelectMenuBuilder,
   ButtonBuilder,
-  ButtonStyle
+  ButtonStyle,
+  StringSelectMenuBuilder
 } = require("discord.js");
 
 const {
@@ -27,6 +29,55 @@ const {
 // dan tidak mengubah database sampai semua
 // stamper selesai dipilih.
 const pendingBulkSales = new Map();
+const BULK_SOLD_MODAL_BATCH_SIZE = 5;
+
+function truncateModalLabel(value, max = 45) {
+  const text = String(value || "").trim();
+  return text.length <= max ? text : `${text.slice(0, max - 1)}…`;
+}
+
+function truncateTextInputPlaceholder(value, max = 100) {
+  const text = String(value || "");
+  return text.length <= max ? text : `${text.slice(0, max - 1)}…`;
+}
+
+function buildBulkGoldModal(interaction, pending, batchIndex) {
+  const start = batchIndex * BULK_SOLD_MODAL_BATCH_SIZE;
+  const batchItems = pending.itemNames.slice(
+    start,
+    start + BULK_SOLD_MODAL_BATCH_SIZE
+  );
+
+  const language = guildLanguage(interaction.guildId);
+  const modal = new ModalBuilder()
+    .setCustomId(`sold:bulk_gold:${pending.token}:${batchIndex}`)
+    .setTitle(
+      t(language, "modal_bulk_sold_title")
+    );
+
+  for (let offset = 0; offset < batchItems.length; offset++) {
+    const absoluteIndex = start + offset;
+    const itemName = batchItems[offset];
+
+    const input = new TextInputBuilder()
+      .setCustomId(`gold:${pending.token}:${absoluteIndex}`)
+      .setLabel(truncateModalLabel(itemName))
+      .setPlaceholder(
+        truncateTextInputPlaceholder(
+          t(language, "modal_bulk_sold_gold_placeholder")
+        )
+      )
+      .setStyle(TextInputStyle.Short)
+      .setRequired(true)
+      .setMaxLength(100);
+
+    modal.addComponents(
+      new ActionRowBuilder().addComponents(input)
+    );
+  }
+
+  return modal;
+}
 
 
 /*
@@ -73,29 +124,6 @@ function isHostOrCoHost(interaction, dashboard) {
 }
 
 
-async function requireHostOrCoHost(
-  interaction,
-  dashboard
-) {
-  if (
-    isHostOrCoHost(
-      interaction,
-      dashboard
-    )
-  ) {
-    return true;
-  }
-
-  await interaction.reply({
-    content:
-      "❌ Hanya **Host**, **Co-Host**, atau **Administrator** yang dapat menggunakan command `/sold` pada raid ini.",
-    flags: MessageFlags.Ephemeral
-  });
-
-  return false;
-}
-
-
 /*
 ==================================================
 MAKE SALE
@@ -106,105 +134,50 @@ function makeSale({
   interaction,
   itemName,
   gold,
-  stamp,
-  userId
+  drop
 }) {
+  const stamp = Number(drop?.stamp || 0);
+  const stampers =
+    drop && typeof drop.stampers === "object" && drop.stampers
+      ? { ...drop.stampers }
+      : {};
+
   return {
     id: makeId("sale"),
-    itemName,
+    itemName: drop?.itemName || itemName,
     gold,
     stamp,
-
-    stampers:
-      stamp > 0 && userId
-        ? {
-            [userId]: stamp
-          }
-        : {},
-
-    userId:
-      userId || null,
-
-    addedBy:
-      interaction.user.id,
-
-    createdAt:
-      Date.now()
+    stampers,
+    userId: drop?.stamperId || Object.keys(stampers)[0] || null,
+    addedBy: interaction.user.id,
+    createdAt: Date.now()
   };
 }
 
+function findUnsoldDrop(dashboard, itemName) {
+  if (!Array.isArray(dashboard.dropItems)) dashboard.dropItems = [];
 
-/*
-==================================================
-UPDATE DROP FROM SALE
-==================================================
-*/
-
-function updateDropFromSale(
-  dashboard,
-  sale
-) {
-  if (
-    !Array.isArray(
-      dashboard.dropItems
-    )
-  ) {
-    dashboard.dropItems = [];
-  }
-
-  const normalized =
-    normalizeItemName(
-      sale.itemName
-    );
-
-  /*
-  Cocokkan nama item dengan Drop List.
-  */
-
-  const dropItem =
-    dashboard.dropItems.find(
-      drop => {
-        if (drop.sold) {
-          return false;
-        }
-
-        const dropName =
-          normalizeItemName(
-            drop.itemName
-          );
-
-        return (
-          dropName === normalized
-        );
-      }
-    );
-
-  if (!dropItem) {
-    return null;
-  }
-
-  dropItem.sold = true;
-
-  dropItem.saleId =
-    sale.id;
-
-  dropItem.gold =
-    sale.gold;
-
-  dropItem.stamp =
-    sale.stamp;
-
-  dropItem.stampers =
-    {
-      ...sale.stampers
-    };
-
-  dropItem.updatedAt =
-    Date.now();
-
-  return dropItem;
+  const normalized = normalizeItemName(itemName);
+  return dashboard.dropItems.find(
+    drop => !drop.sold && normalizeItemName(drop.itemName) === normalized
+  ) || null;
 }
 
+function updateDropFromSale(dashboard, sale, dropItem = null) {
+  const drop = dropItem || findUnsoldDrop(dashboard, sale.itemName);
+  if (!drop) return null;
+
+  drop.sold = true;
+  drop.saleId = sale.id;
+  drop.gold = sale.gold;
+  drop.updatedAt = Date.now();
+
+  sale.stamp = Number(drop.stamp || 0);
+  sale.stampers = { ...(drop.stampers || {}) };
+  sale.userId = drop.stamperId || Object.keys(sale.stampers)[0] || null;
+
+  return drop;
+}
 
 /*
 ==================================================
@@ -235,6 +208,97 @@ function findNextStamperIndex(
 
 /*
 ==================================================
+BULK SOLD ITEM SELECTION
+==================================================
+*/
+
+function buildBulkSoldSelectionText(pending, language) {
+  const lines = pending.dropItems.map((item, index) =>
+    `${index + 1}. ${item.itemName}`
+  );
+
+  return t(
+    language,
+    "sold_bulk_select_text",
+    null,
+    { items: lines.join("\n") }
+  );
+}
+
+function buildBulkSoldSelectionComponents(pending, language) {
+  const select = new StringSelectMenuBuilder()
+    .setCustomId(`sold:bulk_select:${pending.token}`)
+    .setPlaceholder(t(language, "sold_bulk_select_placeholder"))
+    .setMinValues(1)
+    .setMaxValues(Math.min(25, pending.dropItems.length))
+    .addOptions(
+      pending.dropItems.map((item, index) => ({
+        label: truncateModalLabel(item.itemName, 100),
+        value: String(index),
+        description: t(language, "sold_bulk_select_option_description")
+      }))
+    );
+
+  const cancel = new ButtonBuilder()
+    .setCustomId(`sold:bulk_cancel:${pending.token}`)
+    .setLabel(t(language, "sold_bulk_cancel_label"))
+    .setStyle(ButtonStyle.Danger);
+
+  return [
+    new ActionRowBuilder().addComponents(select),
+    new ActionRowBuilder().addComponents(cancel)
+  ];
+}
+
+async function handleBulkSoldSelection(
+  interaction,
+  token,
+  selectedValues,
+  { data, saveData, updateSalaryDashboard }
+) {
+  const pending = pendingBulkSales.get(token);
+  const language = guildLanguage(interaction.guildId);
+
+  if (!pending) {
+    await interaction.reply({
+      content: t(language, "sold_bulk_expired"),
+      flags: MessageFlags.Ephemeral
+    });
+    return;
+  }
+
+  if (pending.ownerId !== interaction.user.id) {
+    await interaction.reply({
+      content: t(language, "sold_bulk_select_denied"),
+      flags: MessageFlags.Ephemeral
+    });
+    return;
+  }
+
+  const indexes = [...new Set((selectedValues || []).map(Number))]
+    .filter(index => Number.isInteger(index) && index >= 0 && index < pending.dropItems.length);
+
+  if (!indexes.length) {
+    await interaction.reply({
+      content: t(language, "sold_bulk_select_min_one"),
+      flags: MessageFlags.Ephemeral
+    });
+    return;
+  }
+
+  const selectedItems = indexes.map(index => pending.dropItems[index]);
+  pending.selectedIndexes = indexes;
+  pending.itemNames = selectedItems.map(item => item.itemName);
+  pending.stage = "gold";
+  pending.batchIndex = 0;
+
+  // Respond immediately to the component interaction. Discord.js supports
+  // showModal() on StringSelectMenuInteraction, so do not defer/update first.
+  await interaction.showModal(buildBulkGoldModal(interaction, pending, 0));
+}
+
+/*
+==================================================
 STAMPER COMPONENTS
 ==================================================
 */
@@ -242,7 +306,8 @@ STAMPER COMPONENTS
 function buildStamperComponents(
   token,
   sale,
-  index
+  index,
+  language
 ) {
   const select =
     new UserSelectMenuBuilder()
@@ -260,7 +325,7 @@ function buildStamperComponents(
       .setCustomId(
         `sold:bulk_cancel:${token}`
       )
-      .setLabel("Batal")
+      .setLabel(t(language, "sold_bulk_cancel_label"))
       .setStyle(
         ButtonStyle.Danger
       );
@@ -283,24 +348,20 @@ SELECTION TEXT
 
 function buildSelectionText(
   sales,
-  index
+  index,
+  language
 ) {
-  const sale =
-    sales[index];
+  const sale = sales[index];
+  const done = sales.filter(x => x.userId).length;
 
-  const done =
-    sales.filter(
-      x => x.userId
-    ).length;
-
-  return (
-    `🏷️ **Pilih Stamper — ${index + 1}/${sales.length}**\n\n` +
-    `📦 **Item:** ${sale.itemName}\n` +
-    `💰 **Gold:** ${formatGold(sale.gold)}\n` +
-    `🏷️ **Stamp:** ${sale.stamp}\n\n` +
-    `Gunakan menu di bawah untuk memilih anggota yang melakukan stamp.\n` +
-    `📊 Progress: **${done}/${sales.length}** item sudah memiliki stamper.`
-  );
+  return t(language, "sold_bulk_stamper_text", null, {
+    index: index + 1,
+    total: sales.length,
+    item: sale.itemName,
+    gold: formatGold(sale.gold),
+    stamp: sale.stamp,
+    done
+  });
 }
 
 
@@ -411,6 +472,19 @@ async function finalizeBulkSales(
     pending.channelId
   );
 
+  // Keep the Drop List embed synchronized immediately after bulk sold.
+  try {
+    const dropCommand = require("./drop");
+    if (typeof dropCommand.updateDropListMessage === "function") {
+      await dropCommand.updateDropListMessage(interaction, dashboard);
+    }
+  } catch (error) {
+    console.warn(
+      "Drop List embed tidak berhasil di-refresh setelah bulk sold:",
+      error
+    );
+  }
+
 
   /*
   Total gold.
@@ -440,16 +514,16 @@ async function finalizeBulkSales(
   Result.
   */
 
-  const resultLines =
-    pending.sales.map(
-      (sale, index) =>
-        `**${index + 1}. ${sale.itemName}** — ${formatGold(sale.gold)}\n` +
-        `🏷️ ${sale.stamp} stamp • 👤 ${
-          sale.userId
-            ? `<@${sale.userId}>`
-            : "Tidak ada"
-        }`
-    );
+  const language = guildLanguage(interaction.guildId);
+  const resultLines = pending.sales.map((sale, index) =>
+    t(language, "sold_bulk_result_item", null, {
+      index: index + 1,
+      item: sale.itemName,
+      gold: formatGold(sale.gold),
+      stamp: sale.stamp,
+      user: sale.userId ? `<@${sale.userId}>` : t(language, "sold_bulk_no_stamper")
+    })
+  );
 
 
   pendingBulkSales.delete(
@@ -459,25 +533,16 @@ async function finalizeBulkSales(
 
   const payload = {
 
-    content:
-      `✅ **${pending.sales.length} item berhasil dicatat.**\n\n` +
-      resultLines.join("\n\n") +
-      `\n\n📦 Total Gold: **${formatGold(totalGold)}**` +
-      `\n🏷️ Total Stamp: **${totalStamp}**` +
-      `\n📋 Drop List Updated: **${dropUpdated}/${pending.sales.length}**` +
-
-      (
-        unmatchedSales.length
-          ? `\n⚠️ Tidak ditemukan di Drop List: ${
-              unmatchedSales
-                .map(
-                  s =>
-                    `**${s.itemName}**`
-                )
-                .join(", ")
-            }`
-          : ""
-      ),
+    content: t(language, "sold_bulk_result", null, {
+      count: pending.sales.length,
+      items: resultLines.join("\n\n"),
+      totalGold: formatGold(totalGold),
+      totalStamp,
+      dropUpdated,
+      unmatchedText: unmatchedSales.length
+        ? t(language, "sold_bulk_unmatched_prefix") + unmatchedSales.map(s => `**${s.itemName}**`).join(", ")
+        : ""
+    }),
 
     components: []
   };
@@ -551,20 +616,10 @@ async function showNextStamper(
     pending.sales[nextIndex];
 
 
+  const language = guildLanguage(interaction.guildId);
   const payload = {
-
-    content:
-      buildSelectionText(
-        pending.sales,
-        nextIndex
-      ),
-
-    components:
-      buildStamperComponents(
-        pending.token,
-        sale,
-        nextIndex
-      )
+    content: buildSelectionText(pending.sales, nextIndex, language),
+    components: buildStamperComponents(pending.token, sale, nextIndex, language)
   };
 
 
@@ -591,162 +646,65 @@ PARSE BULK SALES
 ==================================================
 */
 
-function parseBulkSales(
-  interaction,
-  rawInput
-) {
-  const cleaned =
-    cleanInput(rawInput);
+function parseBulkSales(interaction, rawInput) {
+  const cleaned = cleanInput(rawInput);
+  const lines = cleaned.split(/\r?\n/).map(x => x.trim()).filter(Boolean);
 
-
-  const lines =
-    cleaned
-      .split(/\r?\n/)
-      .map(x => x.trim())
-      .filter(Boolean);
-
-
-  const MAX_ITEMS = 25;
-
-
-  if (!lines.length) {
-
+  if (!lines.length) return { error: "❌ Tidak ada item yang dimasukkan." };
+  if (lines.length > 25) {
     return {
       error:
-        "❌ Tidak ada item yang dimasukkan."
+        `❌ Maksimal **25 item** dalam satu bulk sold. Kamu memasukkan **${lines.length} item**.`
     };
   }
-
-
-  if (
-    lines.length >
-    MAX_ITEMS
-  ) {
-
-    return {
-      error:
-        `❌ Maksimal **${MAX_ITEMS} item** dalam satu bulk sold. ` +
-        `Kamu memasukkan **${lines.length} item**.`
-    };
-  }
-
 
   const sales = [];
-
   const errors = [];
 
+  for (let index = 0; index < lines.length; index++) {
+    const parts = lines[index].split("|").map(x => x.trim());
 
-  for (
-    let index = 0;
-    index < lines.length;
-    index++
-  ) {
-
-    const parts =
-      lines[index]
-        .split("|")
-        .map(x => x.trim());
-
-
-    if (
-      parts.length !== 3
-    ) {
-
-      errors.push(
-        `Baris ${index + 1}: format harus **Nama | Gold | Stamp**.`
-      );
-
+    if (parts.length !== 2) {
+      errors.push(`Baris ${index + 1}: format harus **Nama Item | Gold**.`);
       continue;
     }
 
-
-    const [
-      itemName,
-      goldText,
-      stampText
-    ] = parts;
-
-
-    const gold =
-      parseGold(
-        goldText
-      );
-
+    const [itemName, goldText] = parts;
+    const gold = parseGold(goldText);
 
     if (!itemName) {
-
-      errors.push(
-        `Baris ${index + 1}: nama item kosong.`
-      );
-
+      errors.push(`Baris ${index + 1}: nama item kosong.`);
       continue;
     }
 
-
-    if (
-      !Number.isFinite(gold) ||
-      gold < 0
-    ) {
-
-      errors.push(
-        `Baris ${index + 1}: gold tidak valid (**${goldText}**).`
-      );
-
+    if (!Number.isFinite(gold) || gold < 0) {
+      errors.push(`Baris ${index + 1}: gold tidak valid (**${goldText}**).`);
       continue;
     }
 
-
-    if (
-      !/^\d+$/.test(
-        stampText
-      )
-    ) {
-
-      errors.push(
-        `Baris ${index + 1}: stamp harus angka bulat (**${stampText}**).`
-      );
-
-      continue;
-    }
-
-
-    const stamp =
-      Number(stampText);
-
-
-    sales.push(
-      makeSale({
-        interaction,
-        itemName,
-        gold,
-        stamp,
-        userId: null
-      })
-    );
+    sales.push({
+      id: makeId("sale"),
+      itemName,
+      gold,
+      stamp: 0,
+      stampers: {},
+      userId: null,
+      addedBy: interaction.user.id,
+      createdAt: Date.now()
+    });
   }
 
-
   if (errors.length) {
-
     return {
-
       error:
-        "❌ **Bulk input dibatalkan.** Tidak ada item yang disimpan.\n\n" +
-        errors
-          .map(
-            x => `• ${x}`
-          )
-          .join("\n") +
-        "\n\nFormat:\n`Nama Item | Gold | Stamp`"
+        "❌ **Bulk Sold dibatalkan.** Tidak ada item yang disimpan.\n\n" +
+        errors.map(x => `• ${x}`).join("\n") +
+        "\n\nFormat:\n`Nama Item | Gold`"
     };
   }
 
-
-  return {
-    sales
-  };
+  return { sales };
 }
-
 
 /*
 ==================================================
@@ -804,73 +762,20 @@ module.exports = {
     new SlashCommandBuilder()
       .setName("sold")
       .setDescription(
-        "Catat item yang berhasil terjual"
+        "Catat item yang terjual dari Drop List lewat Bulk Add"
       )
 
       /*
       ==========================================
-      SOLD ADD
+      SOLD BULK ADD ONLY
       ==========================================
       */
 
       .addSubcommand(sub =>
         sub
-          .setName("add")
+          .setName("bulk")
           .setDescription(
-            "Catat satu item yang berhasil terjual"
-          )
-
-          .addStringOption(o =>
-            o
-              .setName("item_name")
-              .setDescription(
-                "Nama item"
-              )
-              .setRequired(true)
-              .setMaxLength(100)
-          )
-
-          .addStringOption(o =>
-            o
-              .setName("gold")
-              .setDescription(
-                "Harga jual, contoh 500g / 1.5k / 2m"
-              )
-              .setRequired(true)
-          )
-
-          .addIntegerOption(o =>
-            o
-              .setName("stamp")
-              .setDescription(
-                "Jumlah stamp"
-              )
-              .setMinValue(0)
-              .setRequired(true)
-          )
-
-          .addUserOption(o =>
-            o
-              .setName("tag")
-              .setDescription(
-                "Orang yang melakukan stamp"
-              )
-              .setRequired(true)
-          )
-      )
-
-
-      /*
-      ==========================================
-      SOLD BULK
-      ==========================================
-      */
-
-      .addSubcommand(sub =>
-        sub
-          .setName("bulk_add")
-          .setDescription(
-            "Catat banyak item sold lewat Modal lalu pilih stamper"
+            "Catat banyak item dari Drop List lewat Modal"
           )
       ),
 
@@ -890,7 +795,8 @@ module.exports = {
     }
   ) {
 
-    const threadId =
+        patchInteraction(interaction);
+const threadId =
       interaction.channelId;
 
 
@@ -922,200 +828,77 @@ module.exports = {
       return;
     }
 
+    // `/sold` hanya boleh digunakan setelah minimal satu item
+    // dimasukkan melalui `/drop add` atau `/drop bulk`.
+    // Ini mencegah sold dibuat tanpa sumber Drop List.
+    const hasDropData =
+      Array.isArray(dashboard.dropItems) &&
+      dashboard.dropItems.length > 0;
 
-    const sub =
-      interaction.options.getSubcommand();
-
-
-    /*
-    ==========================================
-    HOST / CO-HOST CHECK
-    ==========================================
-    
-    Semua `/sold` hanya Host / Co-Host.
-    */
-
-    const allowed =
-      await requireHostOrCoHost(
-        interaction,
-        dashboard
-      );
-
-
-    if (!allowed) {
-      return;
-    }
-
-
-    /*
-    ==========================================
-    BULK ADD
-    ==========================================
-    */
-
-    if (
-      sub === "bulk_add"
-    ) {
-
-      const modal =
-        new ModalBuilder()
-          .setCustomId(
-            "sold:bulk_add"
-          )
-          .setTitle(
-            "💰 Bulk Sold Item"
-          );
-
-
-      const itemsInput =
-        new TextInputBuilder()
-          .setCustomId(
-            "items"
-          )
-          .setLabel(
-            "Daftar Sold Item"
-          )
-          .setPlaceholder(
-            "DDNL RING ATP | 500g | 10\n" +
-            "BUKU 1 | 1.2k | 0\n" +
-            "FRAGMENT | 2m | 3"
-          )
-          .setStyle(
-            TextInputStyle.Paragraph
-          )
-          .setRequired(true)
-          .setMaxLength(4000);
-
-
-      modal.addComponents(
-        new ActionRowBuilder()
-          .addComponents(
-            itemsInput
-          )
-      );
-
-
-      await interaction.showModal(
-        modal
-      );
-
-      return;
-    }
-
-
-    /*
-    ==========================================
-    SINGLE SOLD
-    ==========================================
-    */
-
-    const itemName =
-      interaction.options.getString(
-        "item_name",
-        true
-      );
-
-
-    const goldText =
-      interaction.options.getString(
-        "gold",
-        true
-      );
-
-
-    const stamp =
-      interaction.options.getInteger(
-        "stamp",
-        false
-      ) || 0;
-
-
-    const user =
-      interaction.options.getUser(
-        "tag",
-        true
-      );
-
-
-    const gold =
-      parseGold(
-        goldText
-      );
-
-
-    if (
-      !Number.isFinite(gold) ||
-      gold < 0
-    ) {
-
+    if (!hasDropData) {
+      const language = guildLanguage(interaction.guildId);
       await interaction.reply({
-        content:
-          "❌ Format gold tidak valid. Contoh: `500g`, `1.5k`, `2m`.",
-
-        flags:
-          MessageFlags.Ephemeral
+        content: t(
+          language,
+          "sold_requires_drop_data"
+        ),
+        flags: MessageFlags.Ephemeral
       });
-
       return;
     }
 
 
-    const sale =
-      makeSale({
-        interaction,
-        itemName,
-        gold,
-        stamp,
-        userId:
-          user.id
+    /*
+    ==========================================
+    BULK ADD ONLY
+    ==========================================
+    */
+
+    const unsoldDrops = dashboard.dropItems
+      .filter(drop => !drop.sold)
+      .slice(0, 25);
+
+    if (!unsoldDrops.length) {
+      await interaction.reply({
+        content: "❌ Tidak ada item yang belum Sold di Drop List.",
+        flags: MessageFlags.Ephemeral
       });
+      return;
+    }
 
+    const token = makeId("bulk_sold");
+    const pending = {
+      token,
+      ownerId: interaction.user.id,
+      guildId: interaction.guildId,
+      channelId: interaction.channelId,
+      dropItems: unsoldDrops.map((drop, index) => ({
+        index,
+        itemName: drop.itemName,
+        dropId: drop.id || null
+      })),
+      selectedIndexes: [],
+      itemNames: [],
+      sales: [],
+      batchIndex: 0,
+      stage: "select",
+      createdAt: Date.now()
+    };
 
-    const dropItem =
-      updateDropFromSale(
-        dashboard,
-        sale
-      );
+    pendingBulkSales.set(token, pending);
 
-
-    dashboard.sales.push(
-      sale
-    );
-
-
-    dashboard.updatedAt =
-      Date.now();
-
-
-    saveData(data);
-
-
-    await updateSalaryDashboard(
-      interaction.guild,
-      threadId
-    );
-
-
-    await interaction.reply({
-
-      content:
-        `✅ **${itemName}** berhasil dicatat.\n\n` +
-        `🧵 Thread: <#${threadId}>\n` +
-        `💰 Gold: **${formatGold(gold)}**\n` +
-        `🏷️ Stamp: **${stamp}**\n` +
-        `👤 Stamper: ${user}\n` +
-        `${
-          dropItem
-            ? "📋 Drop list: **UPDATED**\n"
-            : "⚠️ Item ini belum ada di Drop List.\n"
-        }` +
-        `🆔 ID: \`${sale.id}\``,
-
-      flags:
-        MessageFlags.Ephemeral
-    });
+    try {
+      const language = guildLanguage(interaction.guildId);
+      await interaction.reply({
+        content: buildBulkSoldSelectionText(pending, language),
+        components: buildBulkSoldSelectionComponents(pending, language),
+        flags: MessageFlags.Ephemeral
+      });
+    } catch (error) {
+      pendingBulkSales.delete(token);
+      throw error;
+    }
   },
-
 
   /*
   ==================================================
@@ -1131,199 +914,171 @@ module.exports = {
       updateSalaryDashboard
     }
   ) {
+    const customId = String(interaction.customId || "");
+    const match = customId.match(/^sold:bulk_gold:([^:]+):(\d+)$/);
 
-    const dashboard =
-      getDashboard(
-        data,
-        interaction.guildId,
-        interaction.channelId
-      );
-
-
-    /*
-    ==========================================
-    DASHBOARD CHECK
-    ==========================================
-    */
-
-    if (!dashboard) {
-
+    if (!match) {
       await interaction.reply({
-        content:
-          "❌ Thread ini belum memiliki Salary Dashboard.\n\n" +
-          "Jalankan `/setup` terlebih dahulu.",
-
-        flags:
-          MessageFlags.Ephemeral
+        content: "❌ Sesi Bulk Sold tidak valid. Jalankan `/sold bulk` lagi.",
+        flags: MessageFlags.Ephemeral
       });
-
       return;
     }
 
+    const [, token, batchText] = match;
+    const batchIndex = Number(batchText);
+    const pending = pendingBulkSales.get(token);
 
-    /*
-    ==========================================
-    HOST / CO-HOST CHECK
-    ==========================================
-    
-    Cek ulang ketika modal disubmit.
-    Ini mencegah user bypass permission
-    melalui modal.
-    */
-
-    const allowed =
-      await requireHostOrCoHost(
-        interaction,
-        dashboard
-      );
-
-
-    if (!allowed) {
-      return;
-    }
-
-
-    /*
-    ==========================================
-    PARSE INPUT
-    ==========================================
-    */
-
-    const raw =
-      interaction.fields.getTextInputValue(
-        "items"
-      );
-
-
-    const parsed =
-      parseBulkSales(
-        interaction,
-        raw
-      );
-
-
-    if (
-      parsed.error
-    ) {
-
+    if (!pending) {
       await interaction.reply({
-        content:
-          parsed.error,
-
-        flags:
-          MessageFlags.Ephemeral
+        content: "❌ Sesi Bulk Sold sudah berakhir. Jalankan `/sold bulk` lagi.",
+        flags: MessageFlags.Ephemeral
       });
-
       return;
     }
 
+    if (pending.ownerId !== interaction.user.id) {
+      await interaction.reply({
+        content: "❌ Hanya orang yang menjalankan `/sold bulk` yang dapat mengisi Gold.",
+        flags: MessageFlags.Ephemeral
+      });
+      return;
+    }
 
-    /*
-    ==========================================
-    CREATE PENDING SESSION
-    ==========================================
-    */
+    if (pending.stage !== "gold") {
+      await interaction.reply({
+        content: "❌ Tahap Bulk Sold tidak valid. Jalankan `/sold bulk` lagi.",
+        flags: MessageFlags.Ephemeral
+      });
+      return;
+    }
 
-    const token =
-      makeId(
-        "bulk"
-      );
+    if (batchIndex !== pending.batchIndex) {
+      await interaction.reply({
+        content: "❌ Urutan modal Bulk Sold tidak valid. Jalankan `/sold bulk` lagi.",
+        flags: MessageFlags.Ephemeral
+      });
+      return;
+    }
 
-
-    const pending = {
-
-      token,
-
-      guildId:
-        interaction.guildId,
-
-      channelId:
-        interaction.channelId,
-
-      ownerId:
-        interaction.user.id,
-
-      sales:
-        parsed.sales,
-
-      currentIndex:
-        0,
-
-      createdAt:
-        Date.now()
-    };
-
-
-    pendingBulkSales.set(
-      token,
-      pending
+    const dashboard = getDashboard(
+      data,
+      interaction.guildId,
+      interaction.channelId
     );
 
-
-    /*
-    ==========================================
-    NEXT STAMPER
-    ==========================================
-    */
-
-    const nextIndex =
-      findNextStamperIndex(
-        pending.sales,
-        0
-      );
-
-
-    /*
-    Semua item stamp 0.
-    Langsung simpan.
-    */
-
-    if (
-      nextIndex === -1
-    ) {
-
-      await finalizeBulkSales(
-        interaction,
-        pending,
-        data,
-        saveData,
-        updateSalaryDashboard
-      );
-
+    if (!dashboard) {
+      pendingBulkSales.delete(token);
+      await interaction.reply({
+        content: "❌ Thread ini belum memiliki Salary Dashboard.",
+        flags: MessageFlags.Ephemeral
+      });
       return;
     }
 
+    if (!isHostOrCoHost(interaction, dashboard)) {
+      pendingBulkSales.delete(token);
+      await interaction.reply({
+        content: "❌ Hanya **Host**, **Co-Host**, atau **Administrator** yang dapat menggunakan `/sold`.",
+        flags: MessageFlags.Ephemeral
+      });
+      return;
+    }
 
-    pending.currentIndex =
-      nextIndex;
+    const start = batchIndex * BULK_SOLD_MODAL_BATCH_SIZE;
+    const batchItems = pending.itemNames.slice(
+      start,
+      start + BULK_SOLD_MODAL_BATCH_SIZE
+    );
 
+    const sales = [];
+    const errors = [];
 
-    await interaction.reply({
+    for (let offset = 0; offset < batchItems.length; offset++) {
+      const absoluteIndex = start + offset;
+      const inputId = `gold:${token}:${absoluteIndex}`;
+      const goldText = interaction.fields.getTextInputValue(inputId).trim();
+      const gold = parseGold(goldText);
 
-      content:
-        buildSelectionText(
-          pending.sales,
-          nextIndex
-        ),
+      if (!Number.isFinite(gold) || gold < 0) {
+        errors.push(
+          `**${batchItems[offset]}**: gold tidak valid (**${goldText || "kosong"}**).`
+        );
+        continue;
+      }
 
-      components:
-        buildStamperComponents(
-          pending.token,
-          pending.sales[nextIndex],
-          nextIndex
-        ),
+      const dropItem = findUnsoldDrop(dashboard, batchItems[offset]);
 
-      flags:
-        MessageFlags.Ephemeral
-    });
+      if (!dropItem) {
+        errors.push(
+          `**${batchItems[offset]}**: item tidak ditemukan di Drop List atau sudah Sold.`
+        );
+        continue;
+      }
+
+      sales.push(
+        makeSale({
+          interaction,
+          itemName: batchItems[offset],
+          gold,
+          drop: dropItem
+        })
+      );
+    }
+
+    if (errors.length) {
+      await interaction.reply({
+        content:
+          "❌ **Bulk Sold dibatalkan untuk batch ini.** Periksa nilai berikut dan jalankan `/sold bulk` lagi jika perlu.\n\n" +
+          errors.map(x => `• ${x}`).join("\n"),
+        flags: MessageFlags.Ephemeral
+      });
+      pendingBulkSales.delete(token);
+      return;
+    }
+
+    pending.sales.push(...sales);
+
+    const nextBatch = batchIndex + 1;
+    const hasNextBatch =
+      nextBatch * BULK_SOLD_MODAL_BATCH_SIZE < pending.itemNames.length;
+
+    if (hasNextBatch) {
+      pending.batchIndex = nextBatch;
+      await interaction.showModal(
+        buildBulkGoldModal(interaction, pending, nextBatch)
+      );
+      return;
+    }
+
+    await finalizeBulkSales(
+      interaction,
+      pending,
+      data,
+      saveData,
+      updateSalaryDashboard
+    );
   },
-
 
   /*
   ==================================================
   STAMPER SELECT
   ==================================================
   */
+
+  async handleBulkSoldSelection(
+    interaction,
+    token,
+    selectedValues,
+    context
+  ) {
+    return handleBulkSoldSelection(
+      interaction,
+      token,
+      selectedValues,
+      context
+    );
+  },
 
   async handleStamperSelect(
     interaction,
@@ -1346,7 +1101,7 @@ module.exports = {
 
       await interaction.reply({
         content:
-          "❌ Sesi bulk sold sudah berakhir. Jalankan `/sold bulk_add` lagi.",
+          "❌ Sesi bulk sold sudah berakhir. Jalankan `/sold bulk` lagi.",
 
         flags:
           MessageFlags.Ephemeral
@@ -1368,7 +1123,7 @@ module.exports = {
 
       await interaction.reply({
         content:
-          "❌ Hanya orang yang menjalankan `/sold bulk_add` atau Administrator yang dapat memilih stamper.",
+          "❌ Hanya orang yang menjalankan `/sold bulk` atau Administrator yang dapat memilih stamper.",
 
         flags:
           MessageFlags.Ephemeral
@@ -1445,7 +1200,7 @@ module.exports = {
 
       await interaction.reply({
         content:
-          "❌ Sesi pemilihan stamper tidak valid. Jalankan `/sold bulk_add` lagi.",
+          "❌ Sesi pemilihan stamper tidak valid. Jalankan `/sold bulk` lagi.",
 
         flags:
           MessageFlags.Ephemeral
@@ -1520,6 +1275,7 @@ module.exports = {
     token
   ) {
 
+    const language = guildLanguage(interaction.guildId);
     const pending =
       pendingBulkSales.get(
         token
@@ -1551,8 +1307,7 @@ module.exports = {
     ) {
 
       await interaction.reply({
-        content:
-          "❌ Hanya orang yang menjalankan `/sold bulk_add` atau Administrator yang dapat membatalkan.",
+        content: t(language, "sold_bulk_cancel_denied"),
 
         flags:
           MessageFlags.Ephemeral
@@ -1569,8 +1324,7 @@ module.exports = {
 
     await interaction.update({
 
-      content:
-        "❌ **Bulk Sold dibatalkan.** Tidak ada item yang disimpan.",
+      content: t(language, "sold_bulk_cancelled"),
 
       components: []
     });

@@ -1,3 +1,7 @@
+const { buildHostGuide } = require("../lib/hostGuide");
+
+const { guildLanguage, t } = require("../lib/i18n");
+const { patchChannel, patchMessage, patchInteraction } = require("../lib/i18n");
 const {
   PermissionFlagsBits,
   ChannelType,
@@ -48,6 +52,7 @@ REFRESH PARTY
 */
 
 async function refreshParty(interaction, party) {
+  patchInteraction(interaction);
   party.updatedAt = Date.now();
 
   try {
@@ -61,6 +66,7 @@ async function refreshParty(interaction, party) {
         party.messageId
       );
 
+    patchMessage(message);
     await message.edit({
       content: "@here",
       embeds: [
@@ -190,30 +196,8 @@ HOST GUIDE
 ==================================================
 */
 
-function buildSalaryHostGuide(dashboard, party) {
-  const hostId = dashboard?.hostId || party?.creatorId;
-
-  return (`📖 **PANDUAN HOST — SALARY RAID**\n` +
-    `👑 Host: <@${hostId}>\n\n` +
-    `1️⃣ **Atur Harga Stamp**\n` +
-    `\`/setstampprice price:5\`\n\n` +
-    `2️⃣ **Atur Seller Tax**\n` +
-    `\`/salary settax tax:15\`\n` +
-    `💡 Gunakan \`0\` jika raid tanpa Seller Tax.\n\n` +
-    `3️⃣ **Tambahkan Co-Host**\n` +
-    `\`/salary addcohost user:@User\`\n\n` +
-    `4️⃣ **Tambahkan Drop**\n` +
-    `\`/drop add\`\n` +
-    `\`/drop bulk_add\`\n\n` +
-    `5️⃣ **Input Barang Terjual**\n` +
-    `\`/sold_item\`\n\n` +
-    `6️⃣ **Cek Drop / Barang Terjual**\n` +
-    `\`/drop list\`\n` +
-    `\`/sold_list\`\n\n` +
-    `7️⃣ **Selesaikan Raid**\n` +
-    `\`/raid_done\`\n\n` +
-    `⚠️ \`/raid_done\` hanya dapat digunakan oleh **Host / Co-Host**.\n\n` +
-    `💡 **Alur:** Thread → Drop → Sold → Raid Done`);
+function buildSalaryHostGuide(dashboard, party, lang = "id") {
+  return buildHostGuide(dashboard, party, lang);
 }
 
 
@@ -383,7 +367,8 @@ async function createSalaryThreadForParty(
     .map(id => `<@${id}>`)
     .join(", ");
 
-  await thread.send({
+  patchChannel(thread);
+    await thread.send({
     content:
       `👥 **Salary Member:** ${memberMentions}`
   }).catch(() => null);
@@ -419,6 +404,10 @@ async function handlePartyInteraction(
   ctx
 ) {
 
+  // Localize every interaction response/components for this guild.
+  patchInteraction(interaction);
+  const lang = guildLanguage(interaction.guildId);
+
   const {
     data,
     saveData,
@@ -443,6 +432,7 @@ async function handlePartyInteraction(
   // Host Guide berasal dari tombol di Salary Dashboard.
   // Respon dibuat ephemeral agar hanya Host yang menekan tombol yang melihatnya.
   if (action === "hostguide") {
+    const lang = guildLanguage(interaction.guildId);
     const threadId = parts[3];
     const dashboard = getScopedSalaryDashboard(
       data,
@@ -452,15 +442,22 @@ async function handlePartyInteraction(
 
     if (!dashboard) {
       await interaction.reply({
-        content: "❌ Salary Dashboard tidak ditemukan.",
+        content: lang === "en" ? "❌ Salary Dashboard not found." : "❌ Salary Dashboard tidak ditemukan.",
         ephemeral: true
       });
       return;
     }
 
-    if (dashboard.hostId !== interaction.user.id) {
+    const isDiscordAdmin = Boolean(
+      interaction.memberPermissions?.has("Administrator")
+    );
+    const isHost = dashboard.hostId === interaction.user.id;
+    const isCoHost = Array.isArray(dashboard.coHostIds) &&
+      dashboard.coHostIds.includes(interaction.user.id);
+
+    if (!isHost && !isCoHost && !isDiscordAdmin) {
       await interaction.reply({
-        content: "❌ **Host Guide hanya dapat dilihat oleh Host.**",
+        content: t(lang, "guide_host_only"),
         ephemeral: true
       });
       return;
@@ -472,7 +469,7 @@ async function handlePartyInteraction(
       partyId
     );
 
-    const guide = buildSalaryHostGuide(dashboard, party);
+    const guide = buildSalaryHostGuide(dashboard, party, lang);
 
     await interaction.reply({
       content: guide,
@@ -499,7 +496,7 @@ async function handlePartyInteraction(
 
     if (!party) {
       await interaction.reply({
-        content: "❌ Party sudah tidak ditemukan.",
+        content: t(lang, "party_not_found"),
         ephemeral: true
       });
       return;
@@ -508,7 +505,7 @@ async function handlePartyInteraction(
     if (!hasPartyAdmin(interaction, party)) {
       await interaction.reply({
         content:
-          "❌ Hanya **Host/Creator Party** atau **Administrator Discord** yang dapat mengedit party.",
+          t(lang, "party_edit_denied"),
         ephemeral: true
       });
       return;
@@ -517,7 +514,7 @@ async function handlePartyInteraction(
     if (party.status !== "OPEN") {
       await interaction.reply({
         content:
-          "🔒 Party harus dalam status **OPEN** sebelum diedit.",
+          t(lang, "party_edit_open_required"),
         ephemeral: true
       });
       return;
@@ -525,28 +522,25 @@ async function handlePartyInteraction(
 
     const modal = new ModalBuilder()
       .setCustomId(`party:edit:${party.id}`)
-      .setTitle("✏️ Edit Party");
+      .setTitle(t(lang, "party_modal_title"));
 
     const titleInput = new TextInputBuilder()
       .setCustomId("title")
-      .setLabel("Judul / Nama Party")
-      .setPlaceholder("Contoh: SDN Hardcore • Need DPS")
+      .setLabel(t(lang, "party_modal_title_label"))
+      .setPlaceholder(t(lang, "party_modal_title_placeholder"))
       .setStyle(TextInputStyle.Short)
       .setRequired(true)
       .setValue(String(party.name || "").slice(0, 80))
       .setMaxLength(80);
 
-    const currentJobs =
-      party.customJobs?.length
-        ? party.customJobs
-        : Object.keys(party.slots || {}).map((_, i) => `Slot ${i + 1}`);
+    const currentJobs = getPartyRoles(party).map(role => role.label);
 
     const jobsInput = new TextInputBuilder()
       .setCustomId("jobs")
-      .setLabel("Job / Slot (1 job per baris, max 8)")
-      .setPlaceholder("MT\nHEALER\nICE STACKING\nFU\nKALI\nACRO\nMC\nDPS")
+      .setLabel(t(lang, "party_modal_jobs_label"))
+      .setPlaceholder(t(lang, "party_modal_jobs_placeholder"))
       .setStyle(TextInputStyle.Paragraph)
-      .setRequired(true)
+      .setRequired(false)
       .setValue(currentJobs.join("\n").slice(0, 800))
       .setMaxLength(800);
 
@@ -570,7 +564,7 @@ async function handlePartyInteraction(
 
     await interaction.reply({
       content:
-        "❌ Party sudah tidak ditemukan.",
+        t(lang, "party_not_found"),
       ephemeral: true
     });
 
@@ -592,7 +586,7 @@ async function handlePartyInteraction(
 
     if (party.status !== "OPEN") {
       await interaction.reply({
-        content: "🔒 Party sedang terkunci/ditutup.",
+        content: t(lang, "party_locked_closed"),
         ephemeral: true
       });
       return;
@@ -600,7 +594,7 @@ async function handlePartyInteraction(
 
     if (!(roleId in party.slots)) {
       await interaction.reply({
-        content: "❌ Slot tersebut tidak tersedia.",
+        content: t(lang, "party_slot_unavailable"),
         ephemeral: true
       });
       return;
@@ -609,7 +603,7 @@ async function handlePartyInteraction(
     if (party.slots[roleId]) {
       await interaction.reply({
         content:
-          `❌ Slot **${roleName(roleId, party)}** sudah diisi <@${party.slots[roleId]}>.`,
+          t(lang, "party_slot_occupied", null, { role: roleName(roleId, party), userId: party.slots[roleId] }),
         ephemeral: true
       });
       return;
@@ -623,7 +617,7 @@ async function handlePartyInteraction(
     if (currentSlot) {
       await interaction.reply({
         content:
-          `❌ Kamu sudah berada di slot **${roleName(currentSlot[0], party)}**. Keluar dulu jika ingin pindah slot.`,
+          t(lang, "party_already_in_slot", null, { role: roleName(currentSlot[0], party) }),
         ephemeral: true
       });
       return;
@@ -631,7 +625,7 @@ async function handlePartyInteraction(
 
     if (memberCount(party) >= party.maxSlots) {
       await interaction.reply({
-        content: "❌ Party sudah penuh.",
+        content: t(lang, "party_full"),
         ephemeral: true
       });
       return;
@@ -644,7 +638,7 @@ async function handlePartyInteraction(
 
     await interaction.reply({
       content:
-        `✅ Kamu masuk ke slot **${roleName(roleId, party)}**.`,
+        t(lang, "party_joined_slot", null, { role: roleName(roleId, party) }),
       ephemeral: true
     });
     return;
@@ -674,7 +668,7 @@ async function handlePartyInteraction(
 
         await interaction.reply({
           content:
-            "🔒 Party sedang terkunci/ditutup.",
+            t(lang, "party_locked_closed"),
           ephemeral: true
         });
 
@@ -685,7 +679,7 @@ async function handlePartyInteraction(
 
         await interaction.reply({
           content:
-            "❌ Slot tersebut tidak tersedia.",
+            t(lang, "party_slot_unavailable"),
           ephemeral: true
         });
 
@@ -696,7 +690,7 @@ async function handlePartyInteraction(
 
         await interaction.reply({
           content:
-            `❌ Slot **${roleId}** sudah diisi <@${party.slots[roleId]}>.`,
+            t(lang, "party_slot_occupied", null, { role: roleId, userId: party.slots[roleId] }),
           ephemeral: true
         });
 
@@ -715,7 +709,7 @@ async function handlePartyInteraction(
 
         await interaction.reply({
           content:
-            `❌ Kamu sudah berada di slot **${currentSlot[0]}**. Keluar dulu jika ingin pindah slot.`,
+            t(lang, "party_already_in_slot", null, { role: currentSlot[0] }),
           ephemeral: true
         });
 
@@ -729,7 +723,7 @@ async function handlePartyInteraction(
 
         await interaction.reply({
           content:
-            "❌ Party sudah penuh.",
+            t(lang, "party_full"),
           ephemeral: true
         });
 
@@ -748,7 +742,7 @@ async function handlePartyInteraction(
 
       await interaction.reply({
         content:
-          `✅ Kamu masuk ke slot **${roleId}**.`,
+          t(lang, "party_joined_slot", null, { role: roleId }),
         ephemeral: true
       });
 
@@ -776,7 +770,7 @@ async function handlePartyInteraction(
 
         await interaction.reply({
           content:
-            "❌ Kamu tidak ada di party ini.",
+            t(lang, "party_not_in_party"),
           ephemeral: true
         });
 
@@ -790,7 +784,7 @@ async function handlePartyInteraction(
 
         await interaction.reply({
           content:
-            "❌ Creator tidak dapat Leave. Gunakan **Close Party** atau `/party delete`.",
+            t(lang, "party_creator_cannot_leave"),
           ephemeral: true
         });
 
@@ -809,7 +803,7 @@ async function handlePartyInteraction(
 
       await interaction.reply({
         content:
-          `🚪 Kamu keluar dari slot **${slot}**.`,
+          t(lang, "party_left_slot", null, { role: slot }),
         ephemeral: true
       });
 
@@ -825,28 +819,14 @@ async function handlePartyInteraction(
 
     if (action === "notify") {
 
-      let canNotify = hasPartyAdmin(interaction, party);
-
-      // Jika Salary Thread sudah dibuat, Host/Co-Host Salary juga
-      // boleh mengirim notifikasi party.
-      if (!canNotify && party.salaryThreadId) {
-        const salaryDashboard = getScopedSalaryDashboard(
-          data,
-          interaction.guildId,
-          party.salaryThreadId
-        );
-
-        canNotify = Boolean(
-          salaryDashboard &&
-          Array.isArray(salaryDashboard.coHostIds) &&
-          salaryDashboard.coHostIds.includes(interaction.user.id)
-        );
-      }
+      // Notify is intentionally restricted to the Party Creator/Host
+      // or a Discord Administrator. Co-Hosts must not be able to notify.
+      const canNotify = hasPartyAdmin(interaction, party);
 
       if (!canNotify) {
         await interaction.reply({
           content:
-            "❌ Hanya **Host, Co-Host, atau Administrator Discord** yang dapat menggunakan tombol Notify.",
+            t(lang, "party_notify_denied"),
           ephemeral: true
         });
         return;
@@ -854,7 +834,7 @@ async function handlePartyInteraction(
 
       if (party.status === "CLOSED") {
         await interaction.reply({
-          content: "❌ Party sudah ditutup.",
+          content: t(lang, "party_closed"),
           ephemeral: true
         });
         return;
@@ -881,11 +861,11 @@ async function handlePartyInteraction(
 
         notificationText =
           `@here\n` +
-          `📢 **PARTY FULL!**\n\n` +
+          `📢 **${t(lang, "party_notification_full")}**\n\n` +
           `⚔️ **${party.name}**\n` +
           `🏰 **${party.nest}**\n\n` +
           `👥 **Member:** ${memberMentions}\n\n` +
-          `🎉 Semua slot party sudah terisi. Silakan bersiap untuk raid!`;
+          `🎉 ${t(lang, "party_notification_full_text")}`;
       } else {
         const emptyLines = emptySlots
           .map(([roleId]) =>
@@ -895,30 +875,76 @@ async function handlePartyInteraction(
 
         notificationText =
           `@here\n` +
-          `📢 **PARTY NOTIFICATION**\n\n` +
+          `📢 **${t(lang, "party_notification_title")}**\n\n` +
           `⚔️ **${party.name}**\n` +
           `🏰 **${party.nest}**\n\n` +
-          `🟢 **Slot yang masih tersedia:**\n${emptyLines}\n\n` +
-          `Silakan klik tombol slot untuk join!`;
+          `🟢 **${t(lang, "party_notification_available")}:**\n${emptyLines}\n\n` +
+          `${t(lang, "party_notification_join_text")}`;
       }
 
       try {
-        // Party Notify sengaja dikirim tanpa embed dashboard.
-        // Hanya notifikasi slot yang dikirim agar channel tidak spam dashboard.
-        await interaction.channel.send({
-          content: notificationText,
-          allowedMentions: { parse: ["everyone", "users"] }
-        });
+        // Party Notify memakai SATU pesan yang disimpan di party.notifyMessageId.
+        // Notifikasi pertama akan @here, sedangkan update berikutnya hanya mengedit
+        // pesan yang sama tanpa mengirim ping baru agar channel tidak menjadi spam.
+        const channel =
+          interaction.channel ||
+          await interaction.guild?.channels
+            .fetch(party.channelId)
+            .catch(() => null);
+
+        if (!channel || !channel.isTextBased?.()) {
+          throw new Error("Party notification channel tidak tersedia.");
+        }
+
+        let notificationMessage = null;
+        let isExistingNotification = false;
+
+        if (party.notifyMessageId) {
+          try {
+            notificationMessage = await channel.messages.fetch(
+              party.notifyMessageId
+            );
+
+            if (notificationMessage.author?.id === interaction.client.user.id) {
+              isExistingNotification = true;
+            } else {
+              notificationMessage = null;
+            }
+          } catch (_) {
+            // Pesan sudah dihapus/tidak dapat diakses. Buat pesan notification baru.
+            notificationMessage = null;
+          }
+        }
+
+        if (isExistingNotification && notificationMessage) {
+          // Jangan kirim @here atau user mention lagi ketika mengedit.
+          const updateText = notificationText
+            .replace(/^@here\n?/, "");
+
+          await notificationMessage.edit({
+            content: updateText,
+            allowedMentions: { parse: [] }
+          });
+        } else {
+          // Pesan pertama tetap mengirim @here agar party members mendapat notifikasi.
+          notificationMessage = await channel.send({
+            content: notificationText,
+            allowedMentions: { parse: ["everyone", "users"] }
+          });
+
+          party.notifyMessageId = notificationMessage.id;
+          party.updatedAt = Date.now();
+          saveData(data);
+        }
 
         await interaction.reply({
-          content: "📢 **@here berhasil dinotifikasi.**",
+          content: t(lang, "party_notification_sent"),
           ephemeral: true
         });
       } catch (error) {
-        console.error("Gagal mengirim party notification:", error);
+        console.error("Gagal mengirim/memperbarui party notification:", error);
         await interaction.reply({
-          content:
-            "❌ Gagal mengirim @here. Pastikan bot memiliki permission **Mention @everyone, Send Messages, dan Embed Links**.",
+          content: t(lang, "party_notification_failed"),
           ephemeral: true
         });
       }
@@ -938,7 +964,7 @@ async function handlePartyInteraction(
       if (!hasPartyAdmin(interaction, party)) {
         await interaction.reply({
           content:
-            "❌ Hanya creator/admin party yang dapat membuat Salary Thread.",
+            t(lang, "party_salary_denied"),
           ephemeral: true
         });
         return;
@@ -947,7 +973,7 @@ async function handlePartyInteraction(
       if (party.status === "CLOSED") {
         await interaction.reply({
           content:
-            "❌ Party sudah ditutup.",
+            t(lang, "party_closed"),
           ephemeral: true
         });
         return;
@@ -956,7 +982,7 @@ async function handlePartyInteraction(
       if (party.status !== "LOCKED") {
         await interaction.reply({
           content:
-            "🔒 **Party harus di-Lock terlebih dahulu** sebelum membuat Salary Thread.",
+            t(lang, "party_lock_required_salary"),
           ephemeral: true
         });
         return;
@@ -991,7 +1017,7 @@ async function handlePartyInteraction(
 
         await interaction.reply({
           content:
-            "❌ Hanya creator/admin yang boleh Lock.",
+            t(lang, "party_lock_denied"),
           ephemeral: true
         });
 
@@ -1005,7 +1031,7 @@ async function handlePartyInteraction(
 
         await interaction.reply({
           content:
-            "❌ Party sudah ditutup.",
+            t(lang, "party_closed"),
           ephemeral: true
         });
 
@@ -1053,7 +1079,7 @@ async function handlePartyInteraction(
 
         await interaction.reply({
           content:
-            "❌ Hanya creator/admin yang boleh Close.",
+            t(lang, "party_close_denied"),
           ephemeral: true
         });
 
@@ -1097,7 +1123,7 @@ async function handlePartyInteraction(
 
         await interaction.reply({
           content:
-            "❌ Hanya creator/admin yang boleh Add Member.",
+            t(lang, "party_add_denied"),
           ephemeral: true
         });
 
@@ -1111,7 +1137,7 @@ async function handlePartyInteraction(
 
         await interaction.reply({
           content:
-            "🔒 Unlock party terlebih dahulu.",
+            t(lang, "party_unlock_required"),
           ephemeral: true
         });
 
@@ -1120,12 +1146,12 @@ async function handlePartyInteraction(
 
       await interaction.reply({
         content:
-          "Pilih member yang ingin dimasukkan:",
+          t(lang, "party_select_member"),
 
         components: [
           buildUserSelect(
             `party:adduser:${party.id}`,
-            "Pilih 1 member"
+            t(lang, "party_select_one_member")
           )
         ],
 
@@ -1153,7 +1179,7 @@ async function handlePartyInteraction(
 
         await interaction.reply({
           content:
-            "❌ Hanya creator/admin yang boleh Kick.",
+            t(lang, "party_kick_denied"),
           ephemeral: true
         });
 
@@ -1162,14 +1188,15 @@ async function handlePartyInteraction(
 
       const row =
         buildKickSelect(
-          party
+          party,
+          lang
         );
 
       if (!row) {
 
         await interaction.reply({
           content:
-            "❌ Belum ada member untuk di-kick.",
+            t(lang, "party_no_member_kick"),
           ephemeral: true
         });
 
@@ -1208,7 +1235,7 @@ async function handlePartyInteraction(
 
         await interaction.reply({
           content:
-            "❌ Hanya creator/admin yang boleh Swap.",
+            t(lang, "party_swap_denied"),
           ephemeral: true
         });
 
@@ -1221,7 +1248,8 @@ async function handlePartyInteraction(
 
         components: [
           buildSwapSelect(
-            party
+            party,
+            lang
           )
         ],
 
@@ -1249,7 +1277,7 @@ async function handlePartyInteraction(
 
         await interaction.reply({
           content:
-            "❌ Hanya creator/admin yang boleh SET NEST.",
+            t(lang, "party_set_nest_denied"),
           ephemeral: true
         });
 
@@ -1262,7 +1290,8 @@ async function handlePartyInteraction(
 
         components: [
           buildNestSelect(
-            party.id
+            party.id,
+            lang
           )
         ],
 
@@ -1290,7 +1319,7 @@ async function handlePartyInteraction(
 
         await interaction.reply({
           content:
-            "❌ Hanya creator/admin yang boleh Raid Finish.",
+            t(lang, "party_raid_finish_denied"),
           ephemeral: true
         });
 
@@ -1508,22 +1537,15 @@ async function handlePartyInteraction(
 
           `🧵 Salary Dashboard: <#${threadId}>\n` +
 
-          `👥 ${members.length} member disinkronkan ke Salary.\n` +
+          `${t(lang, "party_finish_member_sync", null, { count: members.length })}\n` +
 
-          `💰 Total Gold saat ini: **${summary.totalGold.toLocaleString("en-US")}g**\n` +
-
-          `🧾 Stamp Value: **${summary.stampValue.toLocaleString("en-US")}g**\n` +
-
-          `🏦 Seller Tax: **${summary.sellerTax.toLocaleString("en-US")}g**\n` +
-
-          `💵 Clean Salary: **${summary.totalPool.toLocaleString("en-US")}g**\n` +
-
-
-          `🏷️ Stamp Reward: **${summary.stampRewardTotal.toLocaleString("en-US")}g**\n` +
-
-          `💵 Salary/member: **${summary.salaryPerMember.toLocaleString("en-US")}g**\n` +
-
-          `💰 Total Payout: **${summary.totalPayout.toLocaleString("en-US")}g**`,
+          `💰 ${t(lang, "party_finish_total_gold")}: **${summary.totalGold.toLocaleString("en-US")}g**\n` +
+          `🧾 ${t(lang, "party_finish_stamp_value")}: **${summary.stampValue.toLocaleString("en-US")}g**\n` +
+          `🏦 ${t(lang, "party_finish_seller_tax")}: **${summary.sellerTax.toLocaleString("en-US")}g**\n` +
+          `💵 ${t(lang, "party_finish_clean_salary")}: **${summary.totalPool.toLocaleString("en-US")}g**\n` +
+          `🏷️ ${t(lang, "party_finish_stamp_reward")}: **${summary.stampRewardTotal.toLocaleString("en-US")}g**\n` +
+          `💵 ${t(lang, "party_finish_salary_member")}: **${summary.salaryPerMember.toLocaleString("en-US")}g**\n` +
+          `💰 ${t(lang, "party_finish_total_payout")}: **${summary.totalPayout.toLocaleString("en-US")}g**`,
 
         ephemeral: true
       });
@@ -1552,7 +1574,7 @@ async function handlePartyInteraction(
 
         await interaction.reply({
           content:
-            "❌ Tidak punya akses.",
+            t(lang, "party_no_access"),
           ephemeral: true
         });
 
@@ -1585,7 +1607,7 @@ async function handlePartyInteraction(
 
         await interaction.reply({
           content:
-            "❌ Party sudah penuh.",
+            t(lang, "party_full"),
           ephemeral: true
         });
 
@@ -1612,21 +1634,20 @@ async function handlePartyInteraction(
       const roleSelect = buildRoleSelect(
         party.id,
         userId,
-        party
+        party,
+        lang
       );
 
       if (!roleSelect) {
         await interaction.update({
-          content:
-            "❌ Tidak ada slot yang masih kosong.",
+          content: t(lang, "party_no_empty_slots"),
           components: []
         });
         return;
       }
 
       await interaction.update({
-        content:
-          `Pilih slot yang masih kosong untuk <@${userId}>:`,
+        content: t(lang, "party_select_empty_for_user", null, { userId }),
         components: [roleSelect]
       });
 
@@ -1668,7 +1689,7 @@ async function handlePartyInteraction(
 
         await interaction.update({
           content:
-            "❌ Tidak punya akses.",
+            t(lang, "party_no_access"),
           components: []
         });
 
@@ -1696,7 +1717,7 @@ async function handlePartyInteraction(
 
         await interaction.update({
           content:
-            `❌ Slot **${roleId}** sudah terisi.`,
+            t(lang, "party_slot_occupied", null, { role: roleId, userId: party.slots[roleId] }),
           components: []
         });
 
@@ -1712,7 +1733,7 @@ async function handlePartyInteraction(
 
         await interaction.update({
           content:
-            "❌ User sudah ada di party.",
+            t(lang, "party_user_already_party"),
           components: []
         });
 
@@ -1733,7 +1754,7 @@ async function handlePartyInteraction(
 
       await interaction.update({
         content:
-          `✅ <@${userId}> masuk ke **${roleId}**.`,
+          t(lang, "party_joined_user_slot", null, { userId, role: roleId }),
 
         components: []
       });
@@ -1762,7 +1783,7 @@ async function handlePartyInteraction(
 
         await interaction.update({
           content:
-            "❌ Tidak punya akses.",
+            t(lang, "party_no_access"),
           components: []
         });
 
@@ -1781,7 +1802,7 @@ async function handlePartyInteraction(
 
         await interaction.update({
           content:
-            "❌ Slot sudah kosong.",
+            t(lang, "party_slot_empty_now"),
           components: []
         });
 
@@ -1802,7 +1823,7 @@ async function handlePartyInteraction(
 
       await interaction.update({
         content:
-          `🚪 <@${userId}> dikeluarkan dari **${roleId}**.`,
+          t(lang, "party_removed_user_slot", null, { userId, role: roleId }),
 
         components: []
       });
@@ -1831,7 +1852,7 @@ async function handlePartyInteraction(
 
         await interaction.update({
           content:
-            "❌ Tidak punya akses.",
+            t(lang, "party_no_access"),
           components: []
         });
 
@@ -1866,7 +1887,7 @@ async function handlePartyInteraction(
 
       await interaction.update({
         content:
-          `🔄 Slot **${a}** dan **${b}** berhasil ditukar.`,
+          t(lang, "party_swapped_slots", null, { a, b }),
 
         components: []
       });
@@ -1895,7 +1916,7 @@ async function handlePartyInteraction(
 
         await interaction.update({
           content:
-            "❌ Tidak punya akses.",
+            t(lang, "party_no_access"),
           components: []
         });
 
@@ -1907,12 +1928,12 @@ async function handlePartyInteraction(
 
       await interaction.update({
         content:
-          `🏰 **${selectedNest}** dipilih.\n\n` +
-          `Sekarang pilih mode Nest:`,
+          t(lang, "party_nest_selected", null, { nest: selectedNest }),
         components: [
           buildNestModeSelect(
             party.id,
-            selectedNest
+            selectedNest,
+            lang
           )
         ]
       });
@@ -1940,7 +1961,7 @@ async function handlePartyInteraction(
 
         await interaction.update({
           content:
-            "❌ Tidak punya akses.",
+            t(lang, "party_no_access"),
           components: []
         });
 
@@ -1962,8 +1983,8 @@ async function handlePartyInteraction(
 
       if (!finalNest) {
         await interaction.update({
-          content: "❌ Nest tidak dapat ditentukan. Silakan pilih Nest kembali.",
-          components: [buildNestSelect(party.id)]
+          content: t(lang, "party_nest_not_determined"),
+          components: [buildNestSelect(party.id, lang)]
         });
         return;
       }
@@ -1980,8 +2001,8 @@ async function handlePartyInteraction(
         await interaction.update({
           content:
             `❌ Tidak bisa mengubah ke **${finalNest}** karena party saat ini memiliki **${currentMembers.length} member**.\n\n` +
-            `Nest ini menggunakan maksimal **${layout.maxSlots} slot**. Keluarkan member terlebih dahulu, lalu coba SET NEST lagi.`,
-          components: [buildNestSelect(party.id)]
+            t(lang, "party_nest_max_slots", null, { maxSlots: layout.maxSlots }),
+          components: [buildNestSelect(party.id, lang)]
         });
         return;
       }
@@ -2019,7 +2040,7 @@ async function handlePartyInteraction(
 
       await interaction.update({
         content:
-          `🎯 Nest diubah menjadi **${party.nest}** — **${party.nestMode}**.`,
+          t(lang, "party_nest_changed", null, { nest: party.nest, mode: party.nestMode }),
         components: []
       });
 

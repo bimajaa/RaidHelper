@@ -1,3 +1,4 @@
+const { patchChannel, patchMessage, patchInteraction } = require("../lib/i18n");
 const { SlashCommandBuilder } = require("discord.js");
 const { setParty } = require("../lib/scope");
 
@@ -25,6 +26,7 @@ module.exports = {
     ),
 
   async execute(interaction, { data, saveData, createPartyMessage }) {
+    patchInteraction(interaction);
     const party = createPartyMessage.create({
       name: interaction.options.getString("name"),
       nest: interaction.options.getString("nest"),
@@ -51,6 +53,7 @@ module.exports = {
       return;
     }
 
+    patchChannel(channel);
     const message = await channel.send(
       await createPartyMessage.render(party)
     );

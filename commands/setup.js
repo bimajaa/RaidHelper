@@ -1,3 +1,5 @@
+const { patchInteraction, guildLanguage } = require("../lib/i18n");
+const { buildHostGuide } = require("../lib/hostGuide");
 const {
   SlashCommandBuilder,
   MessageFlags
@@ -24,7 +26,8 @@ module.exports = {
     }
   ) {
 
-    /*
+        patchInteraction(interaction);
+/*
     ==================================================
     CEK HARUS DI THREAD
     ==================================================
@@ -203,44 +206,11 @@ module.exports = {
     if (message) {
 
       await interaction.editReply({
-        content:
-          "✅ **Salary Dashboard berhasil dibuat!**\n\n" +
-
-          `🧵 **Thread:** <#${interaction.channelId}>\n` +
-          `👑 **Host:** <@${dashboard.hostId}>\n` +
-          `👥 **Salary Member:** ${dashboard.salaryMembers.length}\n` +
-          `🏷️ **Stamp Price:** ${dashboard.stampPrice}g\n\n` +
-
-          "━━━━━━━━━━━━━━━━━━\n" +
-          "📖 **PANDUAN RAID**\n" +
-          "━━━━━━━━━━━━━━━━━━\n\n" +
-
-          "👤 **1. Tambahkan Member**\n" +
-          "`/salary addmember members:@User`\n\n" +
-
-          "🤝 **2. Tambahkan Co-Host**\n" +
-          "`/salary addcohost user:@User`\n\n" +
-
-          "🏷️ **3. Atur Harga Stamp**\n" +
-          "`/setstampprice price:5`\n\n" +
-
-          "📦 **4. Tambahkan Drop**\n" +
-          "`/drop add`\n" +
-          "`/drop bulk_add`\n\n" +
-
-          "💰 **5. Input Barang yang Terjual**\n" +
-          "`/sold_item`\n\n" +
-
-          "📋 **6. Cek Barang Terjual**\n" +
-          "`/sold_list`\n\n" +
-
-          "🏁 **7. Selesaikan Raid**\n" +
-          "`/raid_done`\n\n" +
-
-          "⚠️ `/raid_done` hanya dapat digunakan oleh **Host / Co-Host**.\n\n" +
-
-          "💡 **Alur:**\n" +
-          "Thread → Setup → Member → Drop → Sold → Raid Done"
+        content: buildHostGuide(
+          dashboard,
+          { creatorId: dashboard.hostId },
+          guildLanguage(interaction.guildId)
+        )
       });
 
     } else {

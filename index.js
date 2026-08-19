@@ -5,7 +5,8 @@ const {
   EmbedBuilder,
   ActionRowBuilder,
   ButtonBuilder,
-  ButtonStyle
+  ButtonStyle,
+  MessageFlags
 } = require("discord.js");
 
 const fs = require("node:fs");
@@ -47,6 +48,14 @@ const {
   ensureLuckyZoneSettings,
   buildLuckyZoneEmbed
 } = require("./lib/luckyzone");
+
+const {
+  patchInteraction,
+  patchChannel,
+  patchMessage,
+  guildLanguage,
+  t
+} = require("./lib/i18n");
 
 
 /*
@@ -288,6 +297,8 @@ async function updateSalaryDashboard(
         () => null
       );
 
+  patchChannel(thread);
+
 
   /*
   ================================================
@@ -330,14 +341,15 @@ async function updateSalaryDashboard(
   const payload = {
     embeds: [
       buildSalaryEmbed(
-        dashboard
+        dashboard,
+        guild.id
       )
     ],
     components: [
       new ActionRowBuilder().addComponents(
         new ButtonBuilder()
           .setCustomId(`party:hostguide:${dashboard.partyId || "none"}:${threadId}`)
-          .setLabel("Host Guide")
+          .setLabel(t(guildLanguage(guild.id), "guide_button"))
           .setEmoji("📖")
           .setStyle(ButtonStyle.Secondary)
       )
@@ -367,6 +379,8 @@ async function updateSalaryDashboard(
           () => null
         );
 
+    patchMessage(message);
+
   }
 
 
@@ -378,37 +392,77 @@ async function updateSalaryDashboard(
 
   if (message) {
 
-    await message.edit(
-      payload
+    try {
+
+      await message.edit(
+        payload
+      );
+
+      dashboard.updatedAt =
+        Date.now();
+
+      saveData(
+        data,
+        guild.id
+      );
+
+      return message;
+
+    } catch (error) {
+
+      // Message can disappear between fetch() and edit().
+      // Treat it exactly like a missing dashboard message and recreate it.
+      console.warn(
+        `⚠️ Salary Dashboard message ${dashboard.messageId} tidak bisa diedit; membuat ulang.`
+      );
+
+      dashboard.messageId =
+        null;
+
+      message =
+        null;
+    }
+  }
+
+
+  /*
+  ================================================
+  DASHBOARD BELUM ADA / MESSAGE TERHAPUS
+  ================================================
+  */
+
+  try {
+
+    message =
+      await thread.send(
+        payload
+      );
+
+  } catch (error) {
+
+    console.error(
+      "❌ Gagal membuat ulang Salary Dashboard:",
+      error
     );
 
-    dashboard.updatedAt =
-      Date.now();
+    // Keep the ID empty so the next update will retry cleanly.
+    dashboard.messageId =
+      null;
 
     saveData(
       data,
       guild.id
     );
 
-    return message;
+    throw error;
   }
 
-
-  /*
-  ================================================
-  DASHBOARD BELUM ADA
-  ================================================
-  */
-
-  message =
-    await thread.send(
-      payload
-    );
+  patchMessage(message);
 
 
   /*
   ================================================
-  SIMPAN MESSAGE ID
+  SIMPAN MESSAGE ID BARU
   ================================================
   */
 
@@ -446,13 +500,14 @@ async function updateLuckyZone(guild, options = {}) {
   }
 
   const channel = await guild.channels.fetch(settings.channelId).catch(() => null);
+  patchChannel(channel);
   if (!channel || !channel.isTextBased()) {
     console.error(`❌ LuckyZone channel ${settings.channelId} tidak ditemukan.`);
     return null;
   }
 
   const now = new Date();
-  const embed = buildLuckyZoneEmbed(now, settings);
+  const embed = buildLuckyZoneEmbed(now, settings, guild.id);
 
   // LuckyZone menggunakan pesan BARU setiap kali reset harian.
   // Tidak lagi mengedit pesan lama, sehingga histori rotasi tetap terlihat.
@@ -673,6 +728,92 @@ client.once(
 
 /*
 ==================================================
+DASHBOARD / DROP LIST MESSAGE DELETE RECOVERY
+==================================================
+*/
+
+client.on(
+  "messageDelete",
+  async message => {
+
+    try {
+
+      if (!message?.guildId || !message?.id) {
+        return;
+      }
+
+      const data =
+        loadData(message.guildId);
+
+      let changed = false;
+
+      for (const dashboard of Object.values(data.salaryDashboards || {})) {
+
+        if (!dashboard) continue;
+
+        if (
+          String(dashboard.guildId || "") !==
+          String(message.guildId)
+        ) {
+          continue;
+        }
+
+        if (
+          dashboard.messageId &&
+          String(dashboard.messageId) ===
+          String(message.id)
+        ) {
+
+          dashboard.messageId =
+            null;
+
+          dashboard.updatedAt =
+            Date.now();
+
+          changed = true;
+        }
+
+        if (
+          dashboard.dropListMessageId &&
+          String(dashboard.dropListMessageId) ===
+          String(message.id)
+        ) {
+
+          dashboard.dropListMessageId =
+            null;
+
+          dashboard.updatedAt =
+            Date.now();
+
+          changed = true;
+        }
+      }
+
+      if (changed) {
+
+        saveData(
+          data,
+          message.guildId
+        );
+
+        console.log(
+          `♻️ Message dashboard/drop list ${message.id} dihapus; ID lama di-reset agar bisa dibuat ulang.`
+        );
+      }
+
+    } catch (error) {
+
+      console.error(
+        "❌ Gagal menangani penghapusan dashboard/drop list:",
+        error
+      );
+    }
+  }
+);
+
+
+/*
+==================================================
 INTERACTION CREATE
 ==================================================
 */
@@ -680,6 +821,8 @@ INTERACTION CREATE
 client.on(
   "interactionCreate",
   async interaction => {
+
+    patchInteraction(interaction);
 
     try {
 
@@ -740,7 +883,7 @@ client.on(
 
         if (
           interaction.customId ===
-          "drop:bulk_add"
+          "drop:bulk"
         ) {
 
           /*
@@ -799,7 +942,7 @@ client.on(
             await interaction.reply({
 
               content:
-                "❌ Handler `/drop bulk_add` tidak ditemukan di bot.",
+                "❌ Handler `/drop bulk` tidak ditemukan di bot.",
 
               ephemeral:
                 true
@@ -844,7 +987,7 @@ client.on(
         ------------------------------------------
         */
 
-        if (interaction.customId === "sold:bulk_add") {
+        if (interaction.customId?.startsWith("sold:bulk_gold:")) {
 
           if (!interaction.guildId) {
             await interaction.reply({
@@ -859,7 +1002,7 @@ client.on(
           if (!command || typeof command.handleModalSubmit !== "function") {
             console.error("❌ Handler sold.handleModalSubmit tidak ditemukan.");
             await interaction.reply({
-              content: "❌ Handler `/sold bulk_add` tidak ditemukan di bot.",
+              content: "❌ Handler `/sold bulk` tidak ditemukan di bot.",
               ephemeral: true
             });
             return;
@@ -923,6 +1066,31 @@ client.on(
       */
 
       if (interaction.isUserSelectMenu()) {
+        if (interaction.customId && interaction.customId.startsWith("drop:bulk_stamper:")) {
+          if (!interaction.guildId) return;
+
+          const parts = interaction.customId.split(":");
+          const token = parts[2];
+          const index = parts[3];
+          const command = commands.get("drop");
+
+          if (!command || typeof command.handleStamperSelect !== "function") {
+            await interaction.reply({
+              content: "❌ Handler pemilihan stamper Drop tidak ditemukan.",
+              ephemeral: true
+            });
+            return;
+          }
+
+          await command.handleStamperSelect(
+            interaction,
+            token,
+            index,
+            createContext(interaction.guildId)
+          );
+          return;
+        }
+
         if (interaction.customId && interaction.customId.startsWith("sold:bulk_stamper:")) {
           if (!interaction.guildId) return;
 
@@ -949,7 +1117,66 @@ client.on(
         }
       }
 
+      /*
+      ============================================
+      SOLD BULK — ITEM SELECT MENU
+      ============================================
+      */
+
+      if (interaction.isStringSelectMenu() && interaction.customId?.startsWith("sold:bulk_select:")) {
+        if (!interaction.guildId) return;
+
+        const token = interaction.customId.split(":")[2];
+        const command = commands.get("sold");
+        const language = guildLanguage(interaction.guildId);
+
+        if (!command || typeof command.handleBulkSoldSelection !== "function") {
+          await interaction.reply({
+            content: t(language, "sold_bulk_handler_missing"),
+            flags: MessageFlags.Ephemeral
+          });
+          return;
+        }
+
+        try {
+          await command.handleBulkSoldSelection(
+            interaction,
+            token,
+            interaction.values || [],
+            createContext(interaction.guildId)
+          );
+        } catch (error) {
+          console.error("❌ Error handler sold:bulk_select:", error);
+          if (!interaction.replied && !interaction.deferred) {
+            await interaction.reply({
+              content: t(language, "sold_bulk_handler_error"),
+              flags: MessageFlags.Ephemeral
+            }).catch(() => {});
+          }
+        }
+        return;
+      }
+
+
       if (interaction.isButton()) {
+        if (interaction.customId && interaction.customId.startsWith("drop:bulk_cancel:")) {
+          if (!interaction.guildId) return;
+
+          const token = interaction.customId.split(":")[2];
+          const command = commands.get("drop");
+
+          if (!command || typeof command.handleBulkCancel !== "function") {
+            await interaction.reply({
+              content: "❌ Handler pembatalan bulk Drop tidak ditemukan.",
+              ephemeral: true
+            });
+            return;
+          }
+
+          await command.handleBulkCancel(interaction, token);
+          return;
+        }
+
         if (interaction.customId && interaction.customId.startsWith("sold:bulk_cancel:")) {
           if (!interaction.guildId) return;
 
@@ -968,6 +1195,8 @@ client.on(
           return;
         }
       }
+
+
 
 
       /*

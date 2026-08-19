@@ -1,3 +1,4 @@
+const { patchChannel, patchMessage, patchInteraction, guildLanguage, t } = require("../lib/i18n");
 const {
   SlashCommandBuilder,
   ModalBuilder,
@@ -23,6 +24,7 @@ const {
   NORMAL_NEST_OPTIONS,
   MEMORIA_NEST_OPTIONS,
   getAllowedNestModes,
+  getPartyRoles,
   buildPartyEmbed,
   buildPartyComponents
 } = require("../lib/party");
@@ -125,6 +127,8 @@ module.exports = {
     interaction,
     { data, saveData, createPartyMessage, buildPartyListEmbed }
   ) {
+    patchInteraction(interaction);
+    const lang = guildLanguage(interaction.guildId);
     const sub = interaction.options.getSubcommand();
 
     if (sub === "create") {
@@ -173,6 +177,7 @@ module.exports = {
         return;
       }
 
+      patchChannel(channel);
       const message = await channel.send({
         content: "@here",
         embeds: [
@@ -259,31 +264,28 @@ module.exports = {
 
       const modal = new ModalBuilder()
         .setCustomId(`party:edit:${party.id}`)
-        .setTitle("✏️ Edit Party");
+        .setTitle(t(guildLanguage(interaction.guildId), "party_modal_title"));
 
       const titleInput = new TextInputBuilder()
         .setCustomId("title")
-        .setLabel("Judul / Nama Party")
-        .setPlaceholder("Contoh: SDN Hardcore • Need DPS")
+        .setLabel(t(guildLanguage(interaction.guildId), "party_modal_title_label"))
+        .setPlaceholder(t(guildLanguage(interaction.guildId), "party_modal_title_placeholder"))
         .setStyle(TextInputStyle.Short)
         .setRequired(true)
         .setValue(String(party.name || "").slice(0, 80))
         .setMaxLength(80);
 
+      const currentJobs = getPartyRoles(party).map(role => role.label);
+
       const jobsInput = new TextInputBuilder()
         .setCustomId("jobs")
-        .setLabel("Job / Slot (1 job per baris, max 8)")
+        .setLabel(t(guildLanguage(interaction.guildId), "party_modal_jobs_label"))
         .setPlaceholder(
-          "MT\nHEALER\nICE STACKING\nFU\nKALI\nACRO\nMC\nDPS"
+          t(guildLanguage(interaction.guildId), "party_modal_jobs_placeholder")
         )
         .setStyle(TextInputStyle.Paragraph)
-        .setRequired(true)
-        .setValue(
-          (party.customJobs?.length
-            ? party.customJobs
-            : Object.values(party.slots || {}).map((_, i) => `Slot ${i + 1}`)
-          ).join("\n").slice(0, 800)
-        )
+        .setRequired(false)
+        .setValue(currentJobs.join("\n").slice(0, 800))
         .setMaxLength(800);
 
       modal.addComponents(
@@ -392,61 +394,80 @@ module.exports = {
       return;
     }
 
-    const raw = interaction.fields.getTextInputValue("jobs");
+    const raw = interaction.fields.getTextInputValue("jobs").trim();
+    const currentJobs = getPartyRoles(party).map(role => String(role.label).trim());
+
+    // Jika field Job/Slot dikosongkan atau tidak berubah, jangan sentuh
+    // konfigurasi slot sama sekali. Ini membuat edit title-only aman.
+    const normalizedCurrent = currentJobs.map(x =>
+      x.toLowerCase().replace(/\s+/g, " ")
+    );
     const jobs = raw
-      .split(/\r?\n/)
-      .map(x => x.trim())
-      .filter(Boolean);
+      ? raw.split(/\r?\n/).map(x => x.trim()).filter(Boolean)
+      : null;
 
-    if (jobs.length < 4) {
-      await interaction.reply({
-        content:
-          "❌ Custom Party minimal **4 job/slot**.",
-        flags: MessageFlags.Ephemeral
+    const jobsChanged =
+      Array.isArray(jobs) &&
+      (jobs.length !== currentJobs.length ||
+        jobs.some((job, index) => {
+          return (
+            job.toLowerCase().replace(/\s+/g, " ") !==
+            normalizedCurrent[index]
+          );
+        }));
+
+    if (jobsChanged) {
+      if (jobs.length < 4) {
+        await interaction.reply({
+          content:
+            "❌ Custom Party minimal **4 job/slot**.",
+          flags: MessageFlags.Ephemeral
+        });
+        return;
+      }
+
+      if (jobs.length > 8) {
+        await interaction.reply({
+          content:
+            "❌ Custom Party maksimal **8 job/slot**.",
+          flags: MessageFlags.Ephemeral
+        });
+        return;
+      }
+
+      const normalized = jobs.map(x => x.toLowerCase().replace(/\s+/g, " "));
+      if (new Set(normalized).size !== normalized.length) {
+        await interaction.reply({
+          content:
+            "❌ Tidak boleh ada job/slot yang sama lebih dari satu kali.",
+          flags: MessageFlags.Ephemeral
+        });
+        return;
+      }
+
+      const currentMembers = Object.values(party.slots || {}).filter(Boolean);
+
+      if (currentMembers.length > jobs.length) {
+        await interaction.reply({
+          content:
+            `❌ Party sudah memiliki **${currentMembers.length} member**. Custom Job hanya menyediakan **${jobs.length} slot**. Tambahkan slot lebih banyak atau keluarkan member terlebih dahulu.`,
+          flags: MessageFlags.Ephemeral
+        });
+        return;
+      }
+
+      const newSlots = {};
+      jobs.forEach((job, index) => {
+        newSlots[`custom_${index}`] = currentMembers[index] || null;
       });
-      return;
+
+      party.maxSlots = jobs.length;
+      party.jobMode = "custom";
+      party.customJobs = jobs;
+      party.slots = newSlots;
     }
-
-    if (jobs.length > 8) {
-      await interaction.reply({
-        content:
-          "❌ Custom Party maksimal **8 job/slot**.",
-        flags: MessageFlags.Ephemeral
-      });
-      return;
-    }
-
-    const normalized = jobs.map(x => x.toLowerCase().replace(/\s+/g, " "));
-    if (new Set(normalized).size !== normalized.length) {
-      await interaction.reply({
-        content:
-          "❌ Tidak boleh ada job/slot yang sama lebih dari satu kali.",
-        flags: MessageFlags.Ephemeral
-      });
-      return;
-    }
-
-    const currentMembers = Object.values(party.slots || {}).filter(Boolean);
-
-    if (currentMembers.length > jobs.length) {
-      await interaction.reply({
-        content:
-          `❌ Party sudah memiliki **${currentMembers.length} member**. Custom Job hanya menyediakan **${jobs.length} slot**. Tambahkan slot lebih banyak atau keluarkan member terlebih dahulu.`,
-        flags: MessageFlags.Ephemeral
-      });
-      return;
-    }
-
-    const newSlots = {};
-    jobs.forEach((job, index) => {
-      newSlots[`custom_${index}`] = currentMembers[index] || null;
-    });
 
     party.name = title;
-    party.maxSlots = jobs.length;
-    party.jobMode = "custom";
-    party.customJobs = jobs;
-    party.slots = newSlots;
     party.updatedAt = Date.now();
 
     saveData(data);
@@ -457,7 +478,8 @@ module.exports = {
       const message = await channel.messages
         .fetch(party.messageId);
 
-      await message.edit({
+      patchMessage(message);
+    await message.edit({
         embeds: [buildPartyEmbed(party, interaction.guild)],
         components: buildPartyComponents(party)
       });
@@ -469,9 +491,10 @@ module.exports = {
       content:
         `✅ **Party berhasil diperbarui.**\n\n` +
         `📝 Judul: **${title}**\n` +
-        `🎯 Custom Job / Slot:\n` +
-        jobs.map((job, i) => `${i + 1}. **${job}**`).join("\n") +
-        `\n\n👥 Member yang sudah mengisi slot tetap dipertahankan berdasarkan urutan slot.`,
+        (jobsChanged
+          ? `🎯 Custom Job / Slot:\n${jobs.map((job, i) => `${i + 1}. **${job}**`).join("\n")}\n\n`
+          : `🎯 Job / Slot: **Tidak diubah**\n\n`) +
+        `👥 Member yang sudah mengisi slot tetap dipertahankan.`,
       flags: MessageFlags.Ephemeral
     });
   }

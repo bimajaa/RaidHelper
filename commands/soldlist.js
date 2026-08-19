@@ -1,3 +1,4 @@
+const { patchInteraction } = require("../lib/i18n");
 const { getSalaryDashboard } = require("../lib/scope");
 const {
   SlashCommandBuilder,
@@ -39,7 +40,8 @@ module.exports = {
     }
   ) {
 
-    /*
+        patchInteraction(interaction);
+/*
     ==================================================
     THREAD ID
     ==================================================

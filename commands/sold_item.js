@@ -1,3 +1,4 @@
+const { patchInteraction } = require("../lib/i18n");
 const { getSalaryDashboard } = require("../lib/scope");
 const {
   SlashCommandBuilder,
@@ -121,7 +122,8 @@ module.exports = {
     }
   ) {
 
-    const threadId =
+        patchInteraction(interaction);
+const threadId =
       interaction.channelId;
 
 
